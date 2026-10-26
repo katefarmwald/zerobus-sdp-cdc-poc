@@ -1,0 +1,29 @@
+# Lakeflow Spark Declarative Pipeline (SDP) that turns the raw Zerobus change feed
+# into SCD Type 1 and Type 2 tables with AUTO CDC.
+# Field reference: https://docs.databricks.com/aws/en/dev-tools/bundles/resources#pipeline
+
+resources:
+  pipelines:
+    orders_pipeline:
+      name: orders_pipeline
+
+      # Free Edition is serverless-only: no `clusters` block, no photon/edition settings.
+      serverless: true
+
+      # Unity Catalog destination. `schema` is the newer name for what used to be `target`.
+      # Output tables (orders_current, orders_history, ...) are published here, next to orders_raw.
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+
+      # Triggered by default; see the `continuous` variable in databricks.yml.
+      continuous: ${var.continuous}
+
+      # Key/value pairs readable from SQL as ${raw_table}. Keeps the source table name
+      # out of the SQL so catalog/schema overrides flow through to the pipeline code.
+      configuration:
+        raw_table: ${var.catalog}.${var.schema}.orders_raw
+
+      # Every file under src/pipeline/ is part of the pipeline.
+      libraries:
+        - glob:
+            include: ../src/pipeline/**

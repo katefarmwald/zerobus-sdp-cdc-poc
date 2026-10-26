@@ -1,0 +1,41 @@
+# Databricks Asset Bundle for the Zerobus -> SDP AUTO CDC practice POC.
+# Docs: https://docs.databricks.com/aws/en/dev-tools/bundles/settings
+#
+# Only the pipeline is deployed by the bundle. The raw table (sql/setup.sql) and
+# the producer (producer/producer.py) are managed by hand, outside the bundle.
+
+bundle:
+  name: zerobus_sdp_cdc_poc
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Unity Catalog catalog for all tables (Free Edition default is `workspace`).
+    default: workspace
+  schema:
+    description: Schema that holds orders_raw and the pipeline's output tables.
+    default: zb_poc
+  continuous:
+    description: >
+      false = triggered (pay per run, the default). true = continuous; use only for
+      short, deliberate sessions on Free Edition, then redeploy with false.
+      Override with: databricks bundle deploy -t dev --var="continuous=true"
+    default: false
+
+targets:
+  dev:
+    # development mode prefixes resource names with "[dev <user>]", pauses schedules,
+    # and sets `development: true` on the pipeline (faster restarts, no auto-retry).
+    mode: development
+    default: true
+    workspace:
+      # Set to your Free Edition workspace URL, or use a CLI profile instead:
+      #   databricks auth login --host https://dbc-xxxxxxxx-xxxx.cloud.databricks.com --profile zb-poc
+      #   databricks bundle validate -p zb-poc
+      host: https://dbc-38e078da-0d62.cloud.databricks.com
+
+  # No separate "stream" target on purpose: a second target would deploy a second
+  # pipeline, and Free Edition allows only one active pipeline per type. Flip the
+  # same dev pipeline to continuous with the `continuous` variable instead.
