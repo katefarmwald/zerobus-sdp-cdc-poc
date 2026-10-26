@@ -26,7 +26,12 @@ import time
 import uuid
 
 from zerobus.sdk.sync import ZerobusSdk
-from zerobus.sdk.shared import TableProperties, ZerobusException
+from zerobus.sdk.shared import (
+    RecordType,
+    StreamConfigurationOptions,
+    TableProperties,
+    ZerobusException,
+)
 
 try:
     from dotenv import load_dotenv
@@ -118,10 +123,14 @@ def main() -> None:
         os.environ["ZEROBUS_SERVER_ENDPOINT"],
         os.environ["DATABRICKS_WORKSPACE_URL"],
     )
+    # We send dicts (JSON records). The SDK's default record type is UNSPECIFIED,
+    # which is treated as protobuf, so JSON has to be set explicitly.
+    options = StreamConfigurationOptions(record_type=RecordType.JSON)
     stream = sdk.create_stream(
         os.environ["DATABRICKS_CLIENT_ID"],
         os.environ["DATABRICKS_CLIENT_SECRET"],
         TableProperties(os.environ["ZEROBUS_TABLE_NAME"]),
+        options,
     )
     print("Stream open. Ctrl+C to stop.")
 

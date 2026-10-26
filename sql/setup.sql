@@ -22,9 +22,9 @@ CREATE OR REPLACE TABLE workspace.zb_poc.orders_raw (
 -- Grants for the Zerobus service principal. Replace <sp-application-id> with the
 -- service principal's application (client) ID, the same value as DATABRICKS_CLIENT_ID.
 -- The service principal also needs the "Workspace access" entitlement.
-GRANT USE CATALOG ON CATALOG workspace TO `<sp-application-id>`;
-GRANT USE SCHEMA ON SCHEMA workspace.zb_poc TO `<sp-application-id>`;
-GRANT MODIFY, SELECT ON TABLE workspace.zb_poc.orders_raw TO `<sp-application-id>`;
+GRANT USE CATALOG ON CATALOG workspace TO `29d90a77-9732-4091-9832-f909919972b0`;
+GRANT USE SCHEMA ON SCHEMA workspace.zb_poc TO `29d90a77-9732-4091-9832-f909919972b0`;
+GRANT MODIFY, SELECT ON TABLE workspace.zb_poc.orders_raw TO `29d90a77-9732-4091-9832-f909919972b0`;
 
 -- Smoke-test check after `python producer/producer.py --count 5`:
 -- SELECT * FROM workspace.zb_poc.orders_raw ORDER BY seq DESC;

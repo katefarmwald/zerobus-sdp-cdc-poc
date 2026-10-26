@@ -34,7 +34,7 @@ targets:
       # Set to your Free Edition workspace URL, or use a CLI profile instead:
       #   databricks auth login --host https://dbc-xxxxxxxx-xxxx.cloud.databricks.com --profile zb-poc
       #   databricks bundle validate -p zb-poc
-      host: https://dbc-3d82c922-c435.cloud.databricks.com
+      host: https://dbc-38e078da-0d62.cloud.databricks.com
 
   # No separate "stream" target on purpose: a second target would deploy a second
   # pipeline, and Free Edition allows only one active pipeline per type. Flip the
