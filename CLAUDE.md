@@ -50,7 +50,7 @@ pipeline updates or when we query.
 | Decision | Reason |
 |---|---|
 | Zerobus Ingest as the primary ingestion path | Practice push-based streaming ingest; producer runs on the laptop for free. |
-| Fallback: producer writes small JSON files to a UC volume, bronze = Auto Loader streaming table | Zerobus may fail on Free Edition (service principal OAuth relies on account-level infrastructure Free Edition may lack; default-storage tables are a Public Preview target). Everything downstream of bronze stays identical. |
+| Fallback: producer writes small JSON files to a UC volume, bronze = Auto Loader streaming table | Backup only. Zerobus was confirmed working on Free Edition on 2026-10-26 (service principal OAuth + default-storage table). Keep the fallback in mind if that ever breaks; everything downstream of bronze would stay identical. |
 | Low event rate (a few events/sec) | Enough to learn all streaming/CDC semantics while protecting the quota. |
 | Triggered pipeline by default, continuous via a bundle variable/target override | Write streaming code but pay compute per run; flip to continuous only to observe latency. |
 | AUTO CDC (not hand-written MERGE) for SCD1 and SCD2 | Handles ordering via `SEQUENCE BY`, deletes, and SCD2 history declaratively. |
@@ -86,11 +86,15 @@ GRANT MODIFY, SELECT ON TABLE workspace.zb_poc.orders_raw TO `<sp-application-id
 
 ## Producer (`producer/producer.py`)
 
-- Python 3.9+, `pip install databricks-zerobus-ingest-sdk python-dotenv`.
+- Python 3.9+, `pip install databricks-zerobus-ingest-sdk python-dotenv` into `.venv/`
+  (tested with SDK 1.10.0 on Python 3.13). Run with `.\.venv\Scripts\python`.
 - Reads config from `.env` (never commit it): `ZEROBUS_SERVER_ENDPOINT`,
   `DATABRICKS_WORKSPACE_URL`, `ZEROBUS_TABLE_NAME`, `DATABRICKS_CLIENT_ID`,
   `DATABRICKS_CLIENT_SECRET`.
 - Zerobus endpoint format: `https://<workspace-id>.zerobus.<region>.cloud.databricks.com`.
+  Workspace ID is the `?o=` number in the workspace URL; region comes from
+  `SELECT current_metastore()` (for example `aws:us-east-2:...`).
+- Service principal OAuth secret scope: `all-apis` (the SDK requests that scope).
 - Emits a change feed: ~40% INSERT (new order), the rest touch an existing order:
   UPDATE (status advance, ~5% CANCELLED, ~10% amount corrections) or DELETE (~4%).
 - Keeps at most 200 open orders in memory.
@@ -98,18 +102,24 @@ GRANT MODIFY, SELECT ON TABLE workspace.zb_poc.orders_raw TO `<sp-application-id
   - `python producer/producer.py --count 5` (smoke test)
   - `python producer/producer.py --rate 3 --minutes 15`
 - Uses the sync SDK: `ZerobusSdk(endpoint, workspace_url)`,
-  `sdk.create_stream(client_id, client_secret, TableProperties(table))`,
+  `sdk.create_stream(client_id, client_secret, TableProperties(table), options)`,
   `stream.ingest_record_offset(dict)`, `stream.close()` in `finally`.
+- `options = StreamConfigurationOptions(record_type=RecordType.JSON)` is required: the
+  default record type is `UNSPECIFIED`, which the SDK treats as protobuf, and the producer
+  sends dicts.
 
 ## Pipeline design
 
 Source files go in `src/pipeline/`. Target catalog/schema come from bundle variables.
+The AUTO CDC flows live in `src/pipeline/orders_cdc.sql`. The source table is not
+hardcoded: the pipeline `configuration` sets `raw_table` (default
+`workspace.zb_poc.orders_raw`) and the SQL reads it as `${raw_table}`.
 
 ```sql
 -- SCD Type 1
 CREATE OR REFRESH STREAMING TABLE orders_current;
 CREATE FLOW orders_current_cdc AS AUTO CDC INTO orders_current
-FROM STREAM(workspace.zb_poc.orders_raw)
+FROM STREAM(${raw_table})
 KEYS (order_id)
 APPLY AS DELETE WHEN operation = 'DELETE'
 SEQUENCE BY seq
@@ -119,7 +129,7 @@ STORED AS SCD TYPE 1;
 -- SCD Type 2
 CREATE OR REFRESH STREAMING TABLE orders_history;
 CREATE FLOW orders_history_cdc AS AUTO CDC INTO orders_history
-FROM STREAM(workspace.zb_poc.orders_raw)
+FROM STREAM(${raw_table})
 KEYS (order_id)
 APPLY AS DELETE WHEN operation = 'DELETE'
 SEQUENCE BY seq
@@ -143,19 +153,22 @@ Still to build:
 - Pipeline resource: `serverless: true`, `catalog: ${var.catalog}`,
   `schema: ${var.schema}`, `continuous: ${var.continuous}`, source code from
   `src/pipeline/`.
-- Targets: `dev` (default, `mode: development`). Optionally a `stream` target or variable
-  override that sets `continuous: true`. Do not plan on running two pipelines at once.
-- Auth: `databricks auth login` (OAuth U2M) with a CLI profile for the Free Edition workspace.
+- Targets: `dev` only (default, `mode: development`, `workspace.host` set). No separate
+  `stream` target: it would deploy a second pipeline, and Free Edition allows only one
+  active pipeline per type. Use `--var="continuous=true"` on `dev` instead.
+- Auth: OAuth U2M via `databricks auth login --host <workspace-url> --profile zb-poc`.
+  Pass `-p zb-poc` to bundle commands. `~/.databrickscfg` must be saved as UTF-8; the CLI
+  cannot parse UTF-16. `account_id` is not needed (workspace-level profile only).
 - Always verify YAML keys against current Databricks docs and run `databricks bundle validate`
   before deploying; DAB and SDP field names have changed across releases.
 
 Common commands:
 ```
-databricks bundle validate
-databricks bundle deploy -t dev
-databricks bundle run orders_pipeline -t dev
-databricks bundle deploy -t dev --var="continuous=true"   # short real-time sessions only
-databricks bundle destroy -t dev
+databricks bundle validate -p zb-poc
+databricks bundle deploy -t dev -p zb-poc
+databricks bundle run orders_pipeline -t dev -p zb-poc
+databricks bundle deploy -t dev -p zb-poc --var="continuous=true"   # short real-time sessions only
+databricks bundle destroy -t dev -p zb-poc
 ```
 
 ## Repo layout
@@ -166,9 +179,11 @@ zerobus-sdp-cdc-poc/
 ├── databricks.yml
 ├── resources/orders_pipeline.yml
 ├── src/pipeline/            # SDP source files (SQL)
+│   └── orders_cdc.sql       # SCD1 + SCD2 AUTO CDC flows
 ├── producer/producer.py     # runs locally, not deployed by the bundle
 ├── sql/setup.sql            # schema, table, grants (run manually in SQL editor)
 ├── .env                     # local secrets, gitignored
+├── .venv/                   # local Python env for the producer, gitignored
 └── .gitignore               # include .env, .venv/, .databricks/, __pycache__/
 ```
 
@@ -176,14 +191,15 @@ zerobus-sdp-cdc-poc/
 
 - [x] Repo created and cloned.
 - [x] Producer written (change feed with INSERT/UPDATE/DELETE and `seq`).
-- [ ] Confirm Zerobus region availability for the workspace.
-- [ ] Create schema, table, service principal (with Workspace access entitlement), grants.
-- [ ] Smoke test: `python producer/producer.py --count 5`, then
-      `SELECT * FROM workspace.zb_poc.orders_raw ORDER BY seq DESC`.
-  - Auth/token error: switch to the volume + Auto Loader fallback.
-  - Type error on `event_time`: adjust the timestamp encoding in the producer.
-- [ ] Scaffold the bundle (`databricks.yml`, pipeline resource, `src/pipeline/`).
-- [ ] Build expectations, AUTO CDC flows, gold MV.
+- [x] Confirm Zerobus region availability for the workspace.
+- [x] Create schema, table, service principal (with Workspace access entitlement), grants.
+- [x] Smoke test: 5 events ingested via Zerobus, rows and `event_time` look correct
+      (2026-10-26). No fallback needed.
+- [x] Scaffold the bundle (`databricks.yml`, pipeline resource, `src/pipeline/`);
+      `databricks bundle validate -p zb-poc` passes.
+- [x] AUTO CDC flows (SCD1 `orders_current`, SCD2 `orders_history`) written.
+- [ ] Deploy the bundle and do a first triggered run.
+- [ ] Build expectations and gold MV.
 - [ ] Triggered runs, then a short continuous session to observe latency.
 
 ## Experiments to try once data flows
