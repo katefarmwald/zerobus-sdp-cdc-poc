@@ -10,6 +10,7 @@ Usage:
     python producer.py --count 5          # smoke test: send 5 events and exit
     python producer.py --rate 3           # run until Ctrl+C at ~3 events/sec
     python producer.py --rate 3 --minutes 15
+    python producer.py --bad-events 4     # send 4 invalid events (one per expectation) and exit
 
 Required environment variables (put them in a .env file that is NOT committed):
     ZEROBUS_SERVER_ENDPOINT   e.g. https://1234567890123456.zerobus.us-east-2.cloud.databricks.com
@@ -112,11 +113,36 @@ def next_event(open_orders: dict) -> dict:
     }
 
 
+# Each entry breaks exactly one expectation in src/pipeline/orders_clean.sql.
+# Nulls are fine for Zerobus (all columns are nullable); only unknown fields are rejected.
+BAD_EVENT_KINDS = [
+    ("valid_operation", lambda e: e.update(operation="UPSERT")),
+    ("order_id_not_null", lambda e: e.update(order_id=None)),
+    ("seq_not_null", lambda e: e.update(seq=None)),
+    ("positive_amount", lambda e: e.update(amount=-1.0)),
+]
+
+
+def bad_event(i: int) -> tuple:
+    """Return (rule_broken, event): a valid INSERT with one field broken.
+    Uses a throwaway open-orders dict so the normal feed's state is untouched."""
+    rule, corrupt = BAD_EVENT_KINDS[i % len(BAD_EVENT_KINDS)]
+    event = next_event({})
+    corrupt(event)
+    return rule, event
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rate", type=float, default=3.0, help="events per second")
     parser.add_argument("--count", type=int, default=None, help="stop after N events")
     parser.add_argument("--minutes", type=float, default=None, help="stop after N minutes")
+    parser.add_argument(
+        "--bad-events",
+        type=int,
+        default=None,
+        help="send N invalid events (cycling through the expectations) and exit",
+    )
     args = parser.parse_args()
 
     sdk = ZerobusSdk(
@@ -140,6 +166,14 @@ def main() -> None:
     interval = 1.0 / args.rate
 
     try:
+        if args.bad_events is not None:
+            for i in range(args.bad_events):
+                rule, event = bad_event(i)
+                stream.ingest_record_offset(event)
+                sent += 1
+                print(f"sent bad event breaking {rule}: order_id={event['order_id']}")
+            return  # the finally block still closes (and flushes) the stream
+
         while True:
             if args.count is not None and sent >= args.count:
                 break

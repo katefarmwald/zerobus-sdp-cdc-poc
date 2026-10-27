@@ -1,20 +1,14 @@
--- AUTO CDC flows from the raw Zerobus change feed.
---
--- ${raw_table} is substituted from the pipeline `configuration` in
--- resources/orders_pipeline.yml (default: workspace.zb_poc.orders_raw).
+-- AUTO CDC flows from the validated change feed (orders_clean.sql).
 --
 -- orders_raw is append-only: every event is a new row, and the change semantics
--- live in the `operation` column. AUTO CDC reads it as a stream, orders events per
+-- live in the `operation` column. AUTO CDC reads the stream, orders events per
 -- order_id by `seq` (not by arrival), and applies them to the targets.
---
--- TODO: data-quality expectations (valid operation, non-null order_id/seq, amount > 0),
--- possibly in a silver view between raw and these flows. Gold MVs go in their own file.
 
 -- SCD Type 1: one row per order with its latest state. A DELETE removes the row.
 CREATE OR REFRESH STREAMING TABLE orders_current;
 
 CREATE FLOW orders_current_cdc AS AUTO CDC INTO orders_current
-FROM STREAM(${raw_table})
+FROM STREAM(orders_clean)
 KEYS (order_id)
 APPLY AS DELETE WHEN operation = 'DELETE'
 SEQUENCE BY seq
@@ -27,7 +21,7 @@ STORED AS SCD TYPE 1;
 CREATE OR REFRESH STREAMING TABLE orders_history;
 
 CREATE FLOW orders_history_cdc AS AUTO CDC INTO orders_history
-FROM STREAM(${raw_table})
+FROM STREAM(orders_clean)
 KEYS (order_id)
 APPLY AS DELETE WHEN operation = 'DELETE'
 SEQUENCE BY seq

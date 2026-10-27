@@ -56,6 +56,7 @@ pipeline updates or when we query.
 | AUTO CDC (not hand-written MERGE) for SCD1 and SCD2 | Handles ordering via `SEQUENCE BY`, deletes, and SCD2 history declaratively. |
 | `seq` column is clock-based and strictly increasing (epoch micros, +1 on collision) | Survives producer restarts; required for correct out-of-order handling. |
 | Delta Change Data Feed (CDF) is **not** used on `orders_raw` | The raw table is append-only, so CDF would only ever show inserts. The change semantics live in the `operation` column and are applied by AUTO CDC. CDF is only worth exploring downstream (for example reading changes out of `orders_current`) as a later experiment. |
+| Expectations in a temporary silver view with `ON VIOLATION DROP ROW` | Bad events never reach SCD1/SCD2, nothing extra is stored, and `orders_raw` still holds every event for inspection. Trade-off: rules are evaluated once per downstream flow. |
 | Gold as materialized views | On serverless, MVs refresh incrementally when possible, so gold stays incremental without custom logic. |
 | `customer_key` drawn from 1..750,000 | Matches `samples.tpch.customer` keys so gold can join to free sample data. |
 | Pipeline code in **SQL** (current default) | Snippets so far are SQL. Python (`pyspark.pipelines`, `dp.create_auto_cdc_flow`) is acceptable if the user asks. |
@@ -101,6 +102,8 @@ GRANT MODIFY, SELECT ON TABLE workspace.zb_poc.orders_raw TO `<sp-application-id
 - Usage:
   - `python producer/producer.py --count 5` (smoke test)
   - `python producer/producer.py --rate 3 --minutes 15`
+  - `python producer/producer.py --bad-events 4` (one invalid event per expectation, then
+    exit; used to watch `orders_clean` drop rows)
 - Uses the sync SDK: `ZerobusSdk(endpoint, workspace_url)`,
   `sdk.create_stream(client_id, client_secret, TableProperties(table), options)`,
   `stream.ingest_record_offset(dict)`, `stream.close()` in `finally`.
@@ -111,15 +114,32 @@ GRANT MODIFY, SELECT ON TABLE workspace.zb_poc.orders_raw TO `<sp-application-id
 ## Pipeline design
 
 Source files go in `src/pipeline/`. Target catalog/schema come from bundle variables.
-The AUTO CDC flows live in `src/pipeline/orders_cdc.sql`. The source table is not
-hardcoded: the pipeline `configuration` sets `raw_table` (default
-`workspace.zb_poc.orders_raw`) and the SQL reads it as `${raw_table}`.
+The source table is not hardcoded: the pipeline `configuration` sets `raw_table`
+(default `workspace.zb_poc.orders_raw`) and the SQL reads it as `${raw_table}`.
+
+```
+orders_raw ──> orders_clean (temp streaming view, expectations, DROP ROW)
+                 ├─> orders_current  (AUTO CDC, SCD1) ──> revenue_by_status / revenue_by_nation / status_by_nation (MVs)
+                 └─> orders_history  (AUTO CDC, SCD2)
+```
+
+- `orders_clean.sql`: silver. `CREATE TEMPORARY VIEW` over `STREAM(${raw_table})` with four
+  `ON VIOLATION DROP ROW` expectations: `valid_operation`, `order_id_not_null`,
+  `seq_not_null`, `positive_amount`. Not published to UC, stores nothing. Because it is a
+  view read by two flows, each event is checked once per flow, so drop counts appear under
+  both targets. Bad events stay in `orders_raw` for inspection.
+- `orders_cdc.sql`: the AUTO CDC flows below, reading `STREAM(orders_clean)`.
+- `gold.sql`: MVs over `orders_current` with `order_count`, `total_amount` (all statuses),
+  and `revenue` (excludes CANCELLED; not on `status_by_nation`). Nation views join
+  `samples.tpch.customer` (~750K rows) and `samples.tpch.nation`.
+- Changing a flow's source (raw table -> view) needed `--full-refresh-all`; that is safe
+  because `orders_raw` keeps every event and is not owned by the pipeline.
 
 ```sql
 -- SCD Type 1
 CREATE OR REFRESH STREAMING TABLE orders_current;
 CREATE FLOW orders_current_cdc AS AUTO CDC INTO orders_current
-FROM STREAM(${raw_table})
+FROM STREAM(orders_clean)
 KEYS (order_id)
 APPLY AS DELETE WHEN operation = 'DELETE'
 SEQUENCE BY seq
@@ -129,7 +149,7 @@ STORED AS SCD TYPE 1;
 -- SCD Type 2
 CREATE OR REFRESH STREAMING TABLE orders_history;
 CREATE FLOW orders_history_cdc AS AUTO CDC INTO orders_history
-FROM STREAM(${raw_table})
+FROM STREAM(orders_clean)
 KEYS (order_id)
 APPLY AS DELETE WHEN operation = 'DELETE'
 SEQUENCE BY seq
@@ -138,12 +158,6 @@ STORED AS SCD TYPE 2
 TRACK HISTORY ON status, amount;
 ```
 
-Still to build:
-- Data-quality expectations on raw input (for example valid `operation` values, non-null
-  `order_id` and `seq`, `amount > 0`). Decide whether these live in a silver view between
-  raw and the AUTO CDC flows.
-- Gold materialized view(s): for example revenue and order counts by status and by
-  customer nation (join `samples.tpch.customer` and `samples.tpch.nation`).
 
 ## Bundle design
 
@@ -179,7 +193,9 @@ zerobus-sdp-cdc-poc/
 ├── databricks.yml
 ├── resources/orders_pipeline.yml
 ├── src/pipeline/            # SDP source files (SQL)
-│   └── orders_cdc.sql       # SCD1 + SCD2 AUTO CDC flows
+│   ├── orders_clean.sql     # silver view with expectations
+│   ├── orders_cdc.sql       # SCD1 + SCD2 AUTO CDC flows
+│   └── gold.sql             # gold materialized views
 ├── producer/producer.py     # runs locally, not deployed by the bundle
 ├── sql/setup.sql            # schema, table, grants (run manually in SQL editor)
 ├── .env                     # local secrets, gitignored
@@ -198,8 +214,8 @@ zerobus-sdp-cdc-poc/
 - [x] Scaffold the bundle (`databricks.yml`, pipeline resource, `src/pipeline/`);
       `databricks bundle validate -p zb-poc` passes.
 - [x] AUTO CDC flows (SCD1 `orders_current`, SCD2 `orders_history`) written.
-- [ ] Deploy the bundle and do a first triggered run.
-- [ ] Build expectations and gold MV.
+- [x] Deploy the bundle and do a first triggered run (SCD1/SCD2 verified with 60 events).
+- [x] Expectations (silver view, DROP ROW) and gold MVs; verified with `--bad-events 4`.
 - [ ] Triggered runs, then a short continuous session to observe latency.
 
 ## Experiments to try once data flows
